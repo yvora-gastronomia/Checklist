@@ -1,6 +1,7 @@
 import os
 import re
 import time
+import unicodedata
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
 from typing import Dict, List, Optional, Tuple
@@ -182,6 +183,44 @@ def weekday_pt(d: date) -> str:
     return names[d.weekday()]
 
 
+def strip_accents(text: str) -> str:
+    text = str(text or "").strip()
+    return "".join(
+        ch for ch in unicodedata.normalize("NFD", text)
+        if unicodedata.category(ch) != "Mn"
+    )
+
+
+def normalize_weekday_name(value: str) -> str:
+    s = strip_accents(value).lower().strip()
+    s = s.replace("-feira", "")
+    s = s.replace("_", " ")
+    s = re.sub(r"\s+", " ", s)
+
+    mapping = {
+        "segunda": "Segunda",
+        "segunda feira": "Segunda",
+        "seg": "Segunda",
+        "terca": "Terca",
+        "terca feira": "Terca",
+        "ter": "Terca",
+        "quarta": "Quarta",
+        "quarta feira": "Quarta",
+        "qua": "Quarta",
+        "quinta": "Quinta",
+        "quinta feira": "Quinta",
+        "qui": "Quinta",
+        "sexta": "Sexta",
+        "sexta feira": "Sexta",
+        "sex": "Sexta",
+        "sabado": "Sabado",
+        "sab": "Sabado",
+        "domingo": "Domingo",
+        "dom": "Domingo",
+    }
+    return mapping.get(s, "")
+
+
 def pick_col(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
     for c in candidates:
         if c in df.columns:
@@ -244,6 +283,7 @@ def map_itens(df: pd.DataFrame) -> pd.DataFrame:
     c_item = pick_col(df, ["item_id", "id_item", "id", "codigo"])
     c_text = pick_col(df, ["texto", "item", "descricao", "atividade", "tarefa", "nome"])
     c_dead = pick_col(df, ["deadline_hhmm", "deadline", "horario", "hora", "prazo", "horario_hhmm"])
+    c_dia = pick_col(df, ["dia_semana", "dia", "weekday", "dia_da_semana"])
 
     if c_area and c_area != "area_id":
         ren[c_area] = "area_id"
@@ -255,6 +295,8 @@ def map_itens(df: pd.DataFrame) -> pd.DataFrame:
         ren[c_text] = "texto"
     if c_dead and c_dead != "deadline_hhmm":
         ren[c_dead] = "deadline_hhmm"
+    if c_dia and c_dia != "dia_semana":
+        ren[c_dia] = "dia_semana"
 
     if ren:
         df = df.rename(columns=ren)
@@ -269,13 +311,18 @@ def map_itens(df: pd.DataFrame) -> pd.DataFrame:
     if "deadline_hhmm" in df.columns:
         df["deadline_hhmm"] = df["deadline_hhmm"].apply(_clean_hhmm)
 
+    if "dia_semana" in df.columns:
+        df["dia_semana"] = df["dia_semana"].astype(str).apply(normalize_weekday_name)
+    else:
+        df["dia_semana"] = ""
+
     if "ativo" in df.columns:
         df = df[df["ativo"].apply(as_bool) | (df["ativo"].astype(str).str.strip() == "")]
     if "ordem" in df.columns:
         df["ordem"] = pd.to_numeric(df["ordem"], errors="coerce")
-        df = df.sort_values(["area_id", "turno", "ordem", "item_id"], na_position="last")
+        df = df.sort_values(["area_id", "turno", "dia_semana", "ordem", "item_id"], na_position="last")
     else:
-        df = df.sort_values(["area_id", "turno", "item_id"])
+        df = df.sort_values(["area_id", "turno", "dia_semana", "item_id"])
     return df.reset_index(drop=True)
 
 
@@ -300,6 +347,16 @@ def map_users(df: pd.DataFrame) -> pd.DataFrame:
     if "ativo" in df.columns:
         df = df[df["ativo"].apply(as_bool) | (df["ativo"].astype(str).str.strip() == "")]
     return df.reset_index(drop=True)
+
+
+def filter_items_by_weekday(df: pd.DataFrame, weekday_name: str) -> pd.DataFrame:
+    weekday_name = normalize_weekday_name(weekday_name)
+    if "dia_semana" not in df.columns:
+        return df.copy()
+
+    df2 = df.copy()
+    dia_col = df2["dia_semana"].fillna("").astype(str).str.strip()
+    return df2[(dia_col == "") | (dia_col == weekday_name)].copy()
 
 
 @st.cache_data(ttl=300)
@@ -520,18 +577,22 @@ def page_dashboard(cfg: Dict[str, pd.DataFrame], events_df: pd.DataFrame):
             st.rerun()
 
     day_iso = st.session_state["dash_date"].isoformat()
+    day_weekday = weekday_pt(st.session_state["dash_date"])
+    itens_dia = filter_items_by_weekday(itens, day_weekday)
+
     mp = latest_status_map_for_day(events_df, day_iso)
 
-    turnos = sorted(itens["turno"].dropna().astype(str).str.strip().unique().tolist())
+    turnos = sorted(itens_dia["turno"].dropna().astype(str).str.strip().unique().tolist())
 
     for _, a in areas.iterrows():
         area_id = str(a["area_id"]).strip()
         area_nome = str(a["area_nome"]).strip()
         st.markdown(f"### {area_nome}")
+        st.caption(f"Dia considerado: {day_weekday}")
 
         cols = st.columns(2 if len(turnos) >= 2 else 1)
         for i, turno in enumerate(turnos):
-            df_items = itens[(itens["area_id"] == area_id) & (itens["turno"] == turno)].copy()
+            df_items = itens_dia[(itens_dia["area_id"] == area_id) & (itens_dia["turno"] == turno)].copy()
             total = len(df_items)
 
             ok = 0
@@ -582,8 +643,14 @@ def page_checklist(cfg: Dict[str, pd.DataFrame], events_df: pd.DataFrame, user: 
     areas = cfg["areas"]
     itens = cfg["itens"]
 
-    today_iso = datetime.now(TZ).date().isoformat()
+    today_date = datetime.now(TZ).date()
+    today_iso = today_date.isoformat()
+    today_weekday = weekday_pt(today_date)
+
+    itens = filter_items_by_weekday(itens, today_weekday)
     mp = latest_status_map_for_day(events_df, today_iso)
+
+    st.info(f"Exibindo atividades de: {today_weekday}")
 
     areas_labels = [f"{r['area_nome']} ({r['area_id']})" for _, r in areas.iterrows()]
     area_sel = st.selectbox("Area", areas_labels, index=0)
@@ -591,7 +658,7 @@ def page_checklist(cfg: Dict[str, pd.DataFrame], events_df: pd.DataFrame, user: 
 
     turnos = sorted(itens[itens["area_id"] == area_id]["turno"].dropna().astype(str).str.strip().unique().tolist())
     if not turnos:
-        st.warning("Sem turnos para esta area na ITENS.")
+        st.warning("Sem turnos para esta area no dia selecionado.")
         return
 
     turno_sel = st.selectbox("Turno", turnos, index=0)
@@ -602,7 +669,7 @@ def page_checklist(cfg: Dict[str, pd.DataFrame], events_df: pd.DataFrame, user: 
 
     df_items = itens[(itens["area_id"] == area_id) & (itens["turno"] == turno_sel)].copy()
     if df_items.empty:
-        st.warning("Sem itens para esta combinacao.")
+        st.warning("Sem itens para esta combinacao no dia de hoje.")
         return
 
     st.caption("Tudo comeca PENDENTE. Clique OK, Nao OK ou Desmarcar. Para itens NUMERO/TEXTO, preencha o campo e clique OK (ou Nao OK).")
@@ -628,11 +695,14 @@ def page_checklist(cfg: Dict[str, pd.DataFrame], events_df: pd.DataFrame, user: 
         if tipo_resposta in ["NUMERO", "TEXTO"]:
             tipo_line = f"<div style='font-size:12px;margin-top:4px;opacity:0.85;'><b>Entrada:</b> {tipo_resposta}</div>"
 
+        dia_line = f"<div style='font-size:12px;margin-top:4px;opacity:0.85;'><b>Dia:</b> {today_weekday}</div>"
+
         st.markdown(
             f"""
             <div style="border-radius:14px;padding:12px;background:{bg};margin:10px 0;">
               <div style="font-size:15px;font-weight:900;">{texto}</div>
               <div style="font-size:12px;margin-top:6px;"><b>Status:</b> {label}</div>
+              {dia_line}
               {deadline_line}
               {tipo_line}
             </div>
@@ -640,7 +710,6 @@ def page_checklist(cfg: Dict[str, pd.DataFrame], events_df: pd.DataFrame, user: 
             unsafe_allow_html=True,
         )
 
-        # Labels com marca (fica claro o status atual sem mexer em cor de botão)
         ok_label = "OK" + (" ✓" if eff == "OK" else "")
         nok_label = "Nao OK" + (" ✗" if eff == "NAO_OK" else "")
         rst_label = "Desmarcar"
@@ -648,14 +717,12 @@ def page_checklist(cfg: Dict[str, pd.DataFrame], events_df: pd.DataFrame, user: 
         obs_value: str = ""
         obs_key = f"obs_{area_id}_{turno_sel}_{item_id}"
 
-        # Campo extra apenas quando NUMERO/TEXTO
         if tipo_resposta == "NUMERO":
             st.session_state.setdefault(obs_key, "")
             default_num = _safe_float(st.session_state.get(obs_key, ""))
             if default_num is None:
                 default_num = min_hint if min_hint is not None else 0.0
 
-            # Permitindo negativos (ex: freezer)
             min_value = min_hint if min_hint is not None else None
 
             val = st.number_input(
@@ -681,7 +748,6 @@ def page_checklist(cfg: Dict[str, pd.DataFrame], events_df: pd.DataFrame, user: 
 
         c1, c2, c3 = st.columns([1, 1, 1])
 
-        # Importante: nao usar type="primary" para o OK (evita parecer marcado por cor)
         with c1:
             if st.button(ok_label, key=f"ok_{area_id}_{turno_sel}_{item_id}", type="secondary"):
                 if tipo_resposta in ["NUMERO", "TEXTO"] and not str(obs_value).strip():
@@ -692,13 +758,11 @@ def page_checklist(cfg: Dict[str, pd.DataFrame], events_df: pd.DataFrame, user: 
 
         with c2:
             if st.button(nok_label, key=f"nok_{area_id}_{turno_sel}_{item_id}", type="secondary"):
-                # Se houver valor preenchido, grava junto no obs (mesmo em NAO_OK)
                 write_event(user["login"], user["nome"], area_id, turno_sel, item_id, texto, "NAO_OK", obs=str(obs_value).strip())
                 st.rerun()
 
         with c3:
             if st.button(rst_label, key=f"rst_{area_id}_{turno_sel}_{item_id}", type="secondary"):
-                # Desmarcar volta a pendente e limpa obs
                 write_event(user["login"], user["nome"], area_id, turno_sel, item_id, texto, "PENDENTE", obs="")
                 st.session_state[obs_key] = ""
                 st.rerun()
