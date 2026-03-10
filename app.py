@@ -151,12 +151,21 @@ def append_row(sheet_id: str, tab: str, row: List[str], header_if_empty: Optiona
     retryable(lambda: ws.append_row(row, value_input_option="RAW"))
 
 
+def strip_accents(text: str) -> str:
+    text = str(text or "").strip()
+    return "".join(
+        ch for ch in unicodedata.normalize("NFD", text)
+        if unicodedata.category(ch) != "Mn"
+    )
+
+
 def norm_cols(cols: List[str]) -> List[str]:
     out = []
     for c in cols:
         c2 = str(c).strip().lower()
-        c2 = c2.replace(" ", "_")
-        c2 = c2.replace("-", "_")
+        c2 = strip_accents(c2)
+        c2 = re.sub(r"[^a-z0-9]+", "_", c2)
+        c2 = re.sub(r"_+", "_", c2).strip("_")
         out.append(c2)
     return out
 
@@ -183,19 +192,12 @@ def weekday_pt(d: date) -> str:
     return names[d.weekday()]
 
 
-def strip_accents(text: str) -> str:
-    text = str(text or "").strip()
-    return "".join(
-        ch for ch in unicodedata.normalize("NFD", text)
-        if unicodedata.category(ch) != "Mn"
-    )
-
-
 def normalize_weekday_name(value: str) -> str:
-    s = strip_accents(value).lower().strip()
+    s = str(value or "").strip().lower()
+    s = strip_accents(s)
     s = s.replace("-feira", "")
     s = s.replace("_", " ")
-    s = re.sub(r"\s+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
 
     mapping = {
         "segunda": "Segunda",
@@ -278,12 +280,14 @@ def map_itens(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     ren = {}
 
+    raw_cols = list(df.columns)
+
     c_area = pick_col(df, ["area_id", "area", "id_area"])
     c_turno = pick_col(df, ["turno", "shift"])
     c_item = pick_col(df, ["item_id", "id_item", "id", "codigo"])
     c_text = pick_col(df, ["texto", "item", "descricao", "atividade", "tarefa", "nome"])
     c_dead = pick_col(df, ["deadline_hhmm", "deadline", "horario", "hora", "prazo", "horario_hhmm"])
-    c_dia = pick_col(df, ["dia_semana", "dia", "weekday", "dia_da_semana"])
+    c_dia = pick_col(df, ["dia_semana", "dia_da_semana", "dia", "weekday"])
 
     if c_area and c_area != "area_id":
         ren[c_area] = "area_id"
@@ -310,19 +314,27 @@ def map_itens(df: pd.DataFrame) -> pd.DataFrame:
 
     if "deadline_hhmm" in df.columns:
         df["deadline_hhmm"] = df["deadline_hhmm"].apply(_clean_hhmm)
-
-    if "dia_semana" in df.columns:
-        df["dia_semana"] = df["dia_semana"].astype(str).apply(normalize_weekday_name)
     else:
-        df["dia_semana"] = ""
+        df["deadline_hhmm"] = ""
+
+    if "dia_semana" not in df.columns:
+        if len(raw_cols) >= 16:
+            col_p = raw_cols[15]
+            df["dia_semana"] = df[col_p].astype(str)
+        else:
+            df["dia_semana"] = ""
+
+    df["dia_semana"] = df["dia_semana"].astype(str).apply(normalize_weekday_name)
 
     if "ativo" in df.columns:
         df = df[df["ativo"].apply(as_bool) | (df["ativo"].astype(str).str.strip() == "")]
+
     if "ordem" in df.columns:
         df["ordem"] = pd.to_numeric(df["ordem"], errors="coerce")
-        df = df.sort_values(["area_id", "turno", "dia_semana", "ordem", "item_id"], na_position="last")
+        df = df.sort_values(["area_id", "turno", "ordem", "item_id"], na_position="last")
     else:
-        df = df.sort_values(["area_id", "turno", "dia_semana", "item_id"])
+        df = df.sort_values(["area_id", "turno", "item_id"])
+
     return df.reset_index(drop=True)
 
 
@@ -355,8 +367,8 @@ def filter_items_by_weekday(df: pd.DataFrame, weekday_name: str) -> pd.DataFrame
         return df.copy()
 
     df2 = df.copy()
-    dia_col = df2["dia_semana"].fillna("").astype(str).str.strip()
-    return df2[(dia_col == "") | (dia_col == weekday_name)].copy()
+    df2["dia_semana"] = df2["dia_semana"].fillna("").astype(str).apply(normalize_weekday_name)
+    return df2[(df2["dia_semana"] == "") | (df2["dia_semana"] == weekday_name)].copy()
 
 
 @st.cache_data(ttl=300)
@@ -579,8 +591,9 @@ def page_dashboard(cfg: Dict[str, pd.DataFrame], events_df: pd.DataFrame):
     day_iso = st.session_state["dash_date"].isoformat()
     day_weekday = weekday_pt(st.session_state["dash_date"])
     itens_dia = filter_items_by_weekday(itens, day_weekday)
-
     mp = latest_status_map_for_day(events_df, day_iso)
+
+    st.caption(f"Dia considerado no resumo: {day_weekday}")
 
     turnos = sorted(itens_dia["turno"].dropna().astype(str).str.strip().unique().tolist())
 
@@ -588,7 +601,6 @@ def page_dashboard(cfg: Dict[str, pd.DataFrame], events_df: pd.DataFrame):
         area_id = str(a["area_id"]).strip()
         area_nome = str(a["area_nome"]).strip()
         st.markdown(f"### {area_nome}")
-        st.caption(f"Dia considerado: {day_weekday}")
 
         cols = st.columns(2 if len(turnos) >= 2 else 1)
         for i, turno in enumerate(turnos):
@@ -650,7 +662,7 @@ def page_checklist(cfg: Dict[str, pd.DataFrame], events_df: pd.DataFrame, user: 
     itens = filter_items_by_weekday(itens, today_weekday)
     mp = latest_status_map_for_day(events_df, today_iso)
 
-    st.info(f"Exibindo atividades de: {today_weekday}")
+    st.caption(f"Dia identificado automaticamente: {today_weekday}")
 
     areas_labels = [f"{r['area_nome']} ({r['area_id']})" for _, r in areas.iterrows()]
     area_sel = st.selectbox("Area", areas_labels, index=0)
@@ -658,7 +670,7 @@ def page_checklist(cfg: Dict[str, pd.DataFrame], events_df: pd.DataFrame, user: 
 
     turnos = sorted(itens[itens["area_id"] == area_id]["turno"].dropna().astype(str).str.strip().unique().tolist())
     if not turnos:
-        st.warning("Sem turnos para esta area no dia selecionado.")
+        st.warning(f"Sem turnos para esta area em {today_weekday}.")
         return
 
     turno_sel = st.selectbox("Turno", turnos, index=0)
@@ -669,10 +681,10 @@ def page_checklist(cfg: Dict[str, pd.DataFrame], events_df: pd.DataFrame, user: 
 
     df_items = itens[(itens["area_id"] == area_id) & (itens["turno"] == turno_sel)].copy()
     if df_items.empty:
-        st.warning("Sem itens para esta combinacao no dia de hoje.")
+        st.warning(f"Sem itens para esta combinacao em {today_weekday}.")
         return
 
-    st.caption("Tudo comeca PENDENTE. Clique OK, Nao OK ou Desmarcar. Para itens NUMERO/TEXTO, preencha o campo e clique OK (ou Nao OK).")
+    st.caption("Tudo comeca PENDENTE. Clique OK, Nao OK ou Desmarcar. Para itens NUMERO/TEXTO, preencha o campo e clique OK ou Nao OK.")
 
     for _, it in df_items.iterrows():
         item_id = str(it["item_id"]).strip()
