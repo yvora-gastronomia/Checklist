@@ -285,9 +285,9 @@ def map_itens(df: pd.DataFrame) -> pd.DataFrame:
     c_area = pick_col(df, ["area_id", "area", "id_area"])
     c_turno = pick_col(df, ["turno", "shift"])
     c_item = pick_col(df, ["item_id", "id_item", "id", "codigo"])
-    c_text = pick_col(df, ["texto", "item", "descricao", "atividade", "tarefa", "nome"])
+    c_text = pick_col(df, ["texto", "item", "descricao", "descrição", "atividade", "tarefa", "nome"])
     c_dead = pick_col(df, ["deadline_hhmm", "deadline", "horario", "hora", "prazo", "horario_hhmm"])
-    c_dia = pick_col(df, ["dia_semana", "dia_da_semana", "dia", "weekday"])
+    c_dia = pick_col(df, ["dia_semana", "dias_semana", "dia_da_semana", "dias_da_semana", "dia", "weekday"])
 
     if c_area and c_area != "area_id":
         ren[c_area] = "area_id"
@@ -593,7 +593,7 @@ def page_dashboard(cfg: Dict[str, pd.DataFrame], events_df: pd.DataFrame):
     itens_dia = filter_items_by_weekday(itens, day_weekday)
     mp = latest_status_map_for_day(events_df, day_iso)
 
-    st.caption(f"Dia considerado no resumo: {day_weekday}")
+    st.info(f"Resumo considerando: {day_weekday} | {day_iso}")
 
     turnos = sorted(itens_dia["turno"].dropna().astype(str).str.strip().unique().tolist())
 
@@ -662,7 +662,7 @@ def page_checklist(cfg: Dict[str, pd.DataFrame], events_df: pd.DataFrame, user: 
     itens = filter_items_by_weekday(itens, today_weekday)
     mp = latest_status_map_for_day(events_df, today_iso)
 
-    st.caption(f"Dia identificado automaticamente: {today_weekday}")
+    st.info(f"Checklist do dia: {today_weekday} | {today_iso}")
 
     areas_labels = [f"{r['area_nome']} ({r['area_id']})" for _, r in areas.iterrows()]
     area_sel = st.selectbox("Area", areas_labels, index=0)
